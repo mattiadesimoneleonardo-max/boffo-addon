@@ -13,7 +13,8 @@ public class RelogsCommand extends Command {
     @Override
     public void build(LiteralArgumentBuilder<CommandSource> builder) {
         builder.executes(ctx -> {
-            info("Relogs auf diesem Server: " + RelogTracker.INSTANCE.getRelogs());
+            String server = RelogTracker.INSTANCE.getCurrentServer();
+            info("Server: " + (server == null ? "-" : server) + " | Relogs: " + RelogTracker.INSTANCE.getRelogs());
             return SINGLE_SUCCESS;
         });
 
