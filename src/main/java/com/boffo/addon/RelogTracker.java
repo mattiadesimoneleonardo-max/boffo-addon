@@ -5,14 +5,16 @@ import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.orbit.EventHandler;
 
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 
 public class RelogTracker {
     public static final RelogTracker INSTANCE = new RelogTracker();
 
+    private final Map<String, Integer> counts = new HashMap<>();
     private String currentServer = null;
     private int lastConnection = -1;
-    private int relogs = 0;
 
     private boolean pendingJoin = false;
     private int waitTicks = 0;
@@ -46,12 +48,12 @@ public class RelogTracker {
     }
 
     void handleJoin(String serverKey, int connection) {
-        if (serverKey.equals(currentServer)) {
-            if (connection != lastConnection) relogs++;
-        } else {
-            currentServer = serverKey;
-            relogs = 0;
+        if (!counts.containsKey(serverKey)) {
+            counts.put(serverKey, 0);
+        } else if (serverKey.equals(currentServer) && connection != lastConnection) {
+            counts.merge(serverKey, 1, Integer::sum);
         }
+        currentServer = serverKey;
         lastConnection = connection;
     }
 
@@ -64,7 +66,8 @@ public class RelogTracker {
         return null;
     }
 
-    public int getRelogs() { return currentServer == null ? 0 : relogs; }
+    public int getRelogs() { return currentServer == null ? 0 : counts.getOrDefault(currentServer, 0); }
     public String getCurrentServer() { return currentServer; }
-    public void resetCurrent() { relogs = 0; }
+    public void resetCurrent() { if (currentServer != null) counts.put(currentServer, 0); }
+    public void resetAll() { counts.replaceAll((k, v) -> 0); }
 }
