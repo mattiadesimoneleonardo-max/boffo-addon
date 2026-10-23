@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "boffo-addon",
+  "version": "${version}",
+  "name": "Boffo Addon",
+  "description": "Meteor-Client-Addon: HUD-Anzeige, die zaehlt, wie oft du relogged hast.",
+  "authors": ["Boffo"],
+  "environment": "client",
+  "entrypoints": {
+    "meteor": ["com.boffo.addon.BoffoAddon"]
+  },
+  "custom": {
+    "meteor-client:color": "145,61,226"
+  },
+  "depends": {
+    "java": ">=21",
+    "minecraft": "${mc_version}",
+    "meteor-client": "*"
+  }
+}
