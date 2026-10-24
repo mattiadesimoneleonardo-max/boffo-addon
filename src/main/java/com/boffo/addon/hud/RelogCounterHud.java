@@ -3,11 +3,16 @@ package com.boffo.addon.hud;
 import com.boffo.addon.BoffoAddon;
 import com.boffo.addon.RelogTracker;
 import com.boffo.addon.modules.RelogsModule;
+import meteordevelopment.meteorclient.systems.hud.Hud;
 import meteordevelopment.meteorclient.systems.hud.HudElement;
 import meteordevelopment.meteorclient.systems.hud.HudElementInfo;
 import meteordevelopment.meteorclient.systems.hud.HudRenderer;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.render.color.Color;
+import net.minecraft.client.gui.screen.ChatScreen;
+import org.lwjgl.glfw.GLFW;
+
+import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
  * Zeichnet den Relog-Zaehler. Design, Farben usw. stellst du im Modul "relogs" ein.
@@ -47,6 +52,11 @@ public class RelogCounterHud extends HudElement {
     private int count;
     private double pulse;
 
+    // --- Verschieben per Maus im offenen Chat ---
+    private boolean dragging = false;
+    private boolean wasDown = false;
+    private double lastMx, lastMy;
+
     public RelogCounterHud() {
         super(INFO);
     }
@@ -56,6 +66,8 @@ public class RelogCounterHud extends HudElement {
         RelogsModule m = Modules.get().get(RelogsModule.class);
         boolean active = m != null && m.isActive();
         if (m == null || (!active && !isInEditor())) return;
+
+        handleDrag();
 
         r = renderer;
         s = m.scale.get();
@@ -89,6 +101,39 @@ public class RelogCounterHud extends HudElement {
             case Outline -> outline();
             case Compact -> compact();
         }
+    }
+
+    // =============================================================== Verschieben
+
+    /** Chat oeffnen, Linksklick auf die Anzeige halten und ziehen. Die Position wird gespeichert. */
+    private void handleDrag() {
+        if (!(mc.currentScreen instanceof ChatScreen)) {
+            if (dragging) Hud.get().save();
+            dragging = false;
+            wasDown = false;
+            return;
+        }
+
+        boolean down = GLFW.glfwGetMouseButton(mc.getWindow().getHandle(), GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
+        // Mausposition in HUD-Pixeln (wie x und y des Elements)
+        double mx = mc.mouse.getX() * mc.getWindow().getFramebufferWidth() / (double) mc.getWindow().getWidth();
+        double my = mc.mouse.getY() * mc.getWindow().getFramebufferHeight() / (double) mc.getWindow().getHeight();
+
+        if (down && !wasDown) {
+            dragging = mx >= x && mx <= x + getWidth() && my >= y && my <= y + getHeight();
+        }
+
+        if (down && dragging) {
+            int dx = (int) Math.round(mx - lastMx), dy = (int) Math.round(my - lastMy);
+            if (wasDown && (dx != 0 || dy != 0)) move(dx, dy);
+        } else if (!down && dragging) {
+            dragging = false;
+            Hud.get().save();
+        }
+
+        lastMx = mx;
+        lastMy = my;
+        wasDown = down;
     }
 
     // =============================================================== Designs
@@ -491,3 +536,4 @@ public class RelogCounterHud extends HudElement {
         return t.length() > 22 ? t.substring(0, 20) + ".." : t;
     }
 }
+
