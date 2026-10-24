@@ -41,12 +41,13 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * ueber Marker-Bloecke erkannt und nicht markiert.
  */
 public class BoffoDebugModule extends Module {
-    /** Es zaehlen nur Bloecke mit y KLEINER als dieser Wert. */
-    private static final int Y_LIMIT = -10;
+    /** Standardwert: es zaehlen nur Bloecke mit y KLEINER als dieser Wert (einstellbar: max-y). */
+    private static final int DEFAULT_MAX_Y = -10;
 
-    private static final int CELL_SHIFT = 5;            // Zellen von 32x32 Bloecken
+    private static final int CELL_SHIFT = 4;            // Zellen von 16x16 Bloecken (= 1 Chunk)
+    private static final int BASE_RADIUS = 2;           // eine Base fasst Zellen im Umkreis von 2 Zellen (~80 Bloecke) zusammen
     private static final int STRUCTURE_LIMIT = 8;       // ab diesem Gewicht = Struktur, keine Base
-    private static final int STRUCTURE_CELL_RANGE = 2;  // Zellen um die Base, in denen Marker zaehlen
+    private static final int STRUCTURE_RANGE = 3;       // Zellen um die Base, in denen Struktur-Marker zaehlen (~48 Bloecke)
     private static final int CHUNKS_PER_TICK = 4;
     private static final int EVAL_INTERVAL = 20;        // Ticks zwischen Auswertungen
     private static final int BOX_PADDING = 1;           // Kasten ragt 1 Block ueber die Base hinaus
@@ -78,20 +79,18 @@ public class BoffoDebugModule extends Module {
 
     // ---- Struktur-Marker mit Gewicht ----
     private static final Map<String, Integer> STRUCTURE_EXACT = Map.ofEntries(
-        // stark: nur in Strukturen moeglich
+        // stark: nur in Strukturen moeglich (Trial Chamber, Ancient City, Stronghold ...)
         Map.entry("trial_spawner", 8), Map.entry("vault", 8), Map.entry("heavy_core", 8),
         Map.entry("end_portal_frame", 8), Map.entry("end_portal", 8), Map.entry("end_gateway", 8),
-        Map.entry("sculk_shrieker", 8), Map.entry("sculk_catalyst", 8),
+        Map.entry("reinforced_deepslate", 8),
         Map.entry("suspicious_sand", 8), Map.entry("suspicious_gravel", 8),
         // mittel
-        Map.entry("reinforced_deepslate", 3), Map.entry("crying_obsidian", 3), Map.entry("bell", 3),
-        Map.entry("decorated_pot", 3), Map.entry("chiseled_tuff", 3), Map.entry("tuff_bricks", 3),
-        // schwach: viele davon = Struktur (Dungeon, Mineshaft, Ancient City ...)
-        Map.entry("sculk_sensor", 1), Map.entry("calibrated_sculk_sensor", 1), Map.entry("sculk", 1),
-        Map.entry("sculk_vein", 1), Map.entry("hay_block", 1), Map.entry("dirt_path", 1),
-        Map.entry("cobweb", 1), Map.entry("copper_grate", 1), Map.entry("mossy_cobblestone", 1),
-        Map.entry("nether_bricks", 1), Map.entry("purpur_block", 1), Map.entry("purpur_pillar", 1),
-        Map.entry("end_stone_bricks", 1), Map.entry("prismarine_bricks", 1),
+        Map.entry("crying_obsidian", 3), Map.entry("bell", 3), Map.entry("decorated_pot", 3),
+        Map.entry("chiseled_tuff", 3), Map.entry("tuff_bricks", 3),
+        // schwach: erst viele davon = Struktur
+        Map.entry("hay_block", 1), Map.entry("dirt_path", 1), Map.entry("copper_grate", 1),
+        Map.entry("mossy_cobblestone", 1), Map.entry("nether_bricks", 1), Map.entry("purpur_block", 1),
+        Map.entry("purpur_pillar", 1), Map.entry("end_stone_bricks", 1), Map.entry("prismarine_bricks", 1),
         Map.entry("dark_prismarine", 1), Map.entry("sea_lantern", 1)
     );
     private static final String[] STRUCTURE_CONTAINS = { "copper_bulb" };  // Gewicht 1
@@ -100,6 +99,14 @@ public class BoffoDebugModule extends Module {
     // ------------------------------------------------------------------ Einstellungen
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
+
+    private final Setting<Integer> maxYSetting = sgGeneral.add(new IntSetting.Builder()
+        .name("max-y")
+        .description("Es zaehlen nur Bloecke UNTER dieser Hoehe (Y). -10 = nur tiefe Basen, 320 = die ganze Welt.")
+        .defaultValue(DEFAULT_MAX_Y)
+        .range(-64, 320)
+        .sliderRange(-64, 320)
+        .build());
 
     private final Setting<Integer> sensitivity = sgGeneral.add(new IntSetting.Builder()
         .name("sensitivity")
@@ -158,11 +165,14 @@ public class BoffoDebugModule extends Module {
     private final Set<Long> toasted = new HashSet<>();
     private List<Base> bases = new ArrayList<>();
     private int evalTimer;
+    private int scannedChunks;
+    private int limitY = DEFAULT_MAX_Y;
+    private int scannedLimit = Integer.MIN_VALUE;
     private String lastSummary = "";
     private final Set<String> reportedFilters = new HashSet<>();
 
     public BoffoDebugModule() {
-        super(BoffoAddon.CATEGORY, "boffo-debug", "Markiert Spieler-Basen unter Y -10 mit Strahl und Kasten.");
+        super(BoffoAddon.CATEGORY, "boffo-debug", "Markiert Spieler-Basen mit Strahl und Kasten.");
     }
 
     // ------------------------------------------------------------------ Chat / Fehler
@@ -187,13 +197,27 @@ public class BoffoDebugModule extends Module {
     @Override
     public void onActivate() {
         reset();
-        for (Chunk chunk : Utils.chunks()) queue.add(chunk);
-        say("Boffo Debug V2 gestartet (nur Y unter " + Y_LIMIT + ", Sensitivity " + sensitivity.get() + ")");
+        rescanAll();
+        say("Boffo Debug V2 gestartet (zaehlt Bloecke unter Y " + maxYSetting.get() + ", Sensitivity " + sensitivity.get() + ")");
     }
 
     @Override
     public void onDeactivate() {
         reset();
+    }
+
+    /** Alles verwerfen und alle geladenen Chunks mit der aktuellen max-y neu einlesen. */
+    private void rescanAll() {
+        limitY = maxYSetting.get();
+        scannedLimit = limitY;
+        queue.clear();
+        cells.clear();
+        toasted.clear();
+        reportedFilters.clear();
+        bases = new ArrayList<>();
+        evalTimer = 0;
+        scannedChunks = 0;
+        for (Chunk chunk : Utils.chunks()) queue.add(chunk);
     }
 
     @EventHandler
@@ -207,8 +231,10 @@ public class BoffoDebugModule extends Module {
         toasted.clear();
         bases = new ArrayList<>();
         evalTimer = 0;
+        scannedChunks = 0;
         lastSummary = "";
         reportedFilters.clear();
+        scannedLimit = Integer.MIN_VALUE;
     }
 
     // ------------------------------------------------------------------ Events
@@ -222,7 +248,7 @@ public class BoffoDebugModule extends Module {
     private void onBlockUpdate(BlockUpdateEvent event) {
         try {
             BlockPos pos = event.pos;
-            if (pos.getY() >= Y_LIMIT) return;
+            if (pos.getY() >= limitY) return;
             removeAt(pos);
             add(pos.getX(), pos.getY(), pos.getZ(), event.newState.getBlock());
         } catch (Throwable t) {
@@ -234,16 +260,22 @@ public class BoffoDebugModule extends Module {
     private void onTick(TickEvent.Post event) {
         if (mc.world == null || mc.player == null) return;
         try {
+            if (scannedLimit != maxYSetting.get()) {
+                rescanAll(); // max-y wurde geaendert
+                lastSummary = "";
+            }
             for (int i = 0; i < CHUNKS_PER_TICK; i++) {
                 Chunk chunk = queue.poll();
                 if (chunk == null) break;
                 scan(chunk);
             }
 
-            // erst auswerten, wenn alle Chunks gescannt sind, damit Struktur-Marker
-            // in Nachbar-Chunks schon bekannt sind
-            if (!queue.isEmpty()) return;
-            if (++evalTimer < EVAL_INTERVAL) return;
+            // normalerweise erst auswerten, wenn alle Chunks gescannt sind (Struktur-Marker in
+            // Nachbar-Chunks); dauert das Scannen sehr lange, wird trotzdem alle 10 s ausgewertet
+            evalTimer++;
+            boolean scanning = !queue.isEmpty();
+            if (scanning && evalTimer < 200) return;
+            if (!scanning && evalTimer < EVAL_INTERVAL) return;
             evalTimer = 0;
             evaluate();
         } catch (Throwable t) {
@@ -293,6 +325,7 @@ public class BoffoDebugModule extends Module {
         int chunkX = chunk.getPos().x;
         int chunkZ = chunk.getPos().z;
         removeChunk(chunkX, chunkZ);
+        scannedChunks++;
 
         int baseX = chunkX << 4;
         int baseZ = chunkZ << 4;
@@ -301,7 +334,7 @@ public class BoffoDebugModule extends Module {
 
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
-                for (int y = bottom; y < Y_LIMIT; y++) { // nur y < Y_LIMIT
+                for (int y = bottom; y < limitY; y++) { // nur y < max-y
                     pos.set(baseX + x, y, baseZ + z);
                     BlockState state = chunk.getBlockState(pos);
                     if (state.isAir()) continue;
@@ -336,7 +369,7 @@ public class BoffoDebugModule extends Module {
     }
 
     private void add(int x, int y, int z, Block block) {
-        if (y >= Y_LIMIT) return;
+        if (y >= limitY) return;
         int type = classify(block);
         if (type == 0) return;
         Cell cell = cells.computeIfAbsent(cellKey(x, z), k -> new Cell());
@@ -370,70 +403,70 @@ public class BoffoDebugModule extends Module {
     private void evaluate() {
         int minBlocks = sensitivity.get(); // 50 -> 50 Bloecke, 5 -> 5 Bloecke
 
-        Set<Long> visited = new HashSet<>();
+        // Zellen mit Spieler-Bloecken, die dichteste zuerst: jede wird zum Mittelpunkt einer Base
+        List<Map.Entry<Long, Cell>> seeds = new ArrayList<>();
+        int totalPlayer = 0;
+        for (Map.Entry<Long, Cell> e : cells.entrySet()) {
+            int n = e.getValue().player.size();
+            if (n == 0) continue;
+            totalPlayer += n;
+            seeds.add(e);
+        }
+        seeds.sort((x, y) -> Integer.compare(y.getValue().player.size(), x.getValue().player.size()));
+
+        Set<Long> claimed = new HashSet<>();
         List<Base> result = new ArrayList<>();
-        int totalPlayer = 0, clusters = 0, tooSmall = 0, filtered = 0, biggest = 0;
-        for (Cell c : cells.values()) totalPlayer += c.player.size();
+        int candidates = 0, tooSmall = 0, filtered = 0, biggest = 0;
 
-        for (Map.Entry<Long, Cell> entry : cells.entrySet()) {
-            long start = entry.getKey();
-            if (entry.getValue().player.isEmpty() || visited.contains(start)) continue;
+        for (Map.Entry<Long, Cell> seed : seeds) {
+            long sk = seed.getKey();
+            if (claimed.contains(sk)) continue;
+            int scx = (int) (sk >> 32);
+            int scz = (int) sk;
 
-            // Base = zusammenhaengende Zellen mit Spieler-Bloecken
-            List<Long> comp = new ArrayList<>();
-            ArrayDeque<Long> todo = new ArrayDeque<>();
-            todo.add(start);
-            visited.add(start);
-
-            while (!todo.isEmpty()) {
-                long k = todo.poll();
-                comp.add(k);
-                int cx = (int) (k >> 32);
-                int cz = (int) k;
-                for (int dx = -1; dx <= 1; dx++) {
-                    for (int dz = -1; dz <= 1; dz++) {
-                        long nk = cellKeyRaw(cx + dx, cz + dz);
-                        Cell n = cells.get(nk);
-                        if (n != null && !n.player.isEmpty() && visited.add(nk)) todo.add(nk);
-                    }
-                }
-            }
-
+            // Base = Zellen im Umkreis um die dichteste Zelle (begrenzte Groesse, damit nicht
+            // eine ganze Gegend mit vielen Basen zu EINEM Riesen-Cluster verschmilzt)
+            List<Long> group = new ArrayList<>();
             int count = 0;
             double sx = 0, sz = 0;
             int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
             int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
-            Set<Long> near = new HashSet<>();
 
-            for (long k : comp) {
-                Cell cell = cells.get(k);
-                count += cell.player.size();
-                for (long p : cell.player) {
-                    int px = BlockPos.unpackLongX(p), py = BlockPos.unpackLongY(p), pz = BlockPos.unpackLongZ(p);
-                    sx += px;
-                    sz += pz;
-                    minX = Math.min(minX, px); maxX = Math.max(maxX, px);
-                    minY = Math.min(minY, py); maxY = Math.max(maxY, py);
-                    minZ = Math.min(minZ, pz); maxZ = Math.max(maxZ, pz);
+            for (int dx = -BASE_RADIUS; dx <= BASE_RADIUS; dx++) {
+                for (int dz = -BASE_RADIUS; dz <= BASE_RADIUS; dz++) {
+                    long nk = cellKeyRaw(scx + dx, scz + dz);
+                    Cell cell = cells.get(nk);
+                    if (cell == null || cell.player.isEmpty() || claimed.contains(nk)) continue;
+                    group.add(nk);
+                    count += cell.player.size();
+                    for (long p : cell.player) {
+                        int px = BlockPos.unpackLongX(p), py = BlockPos.unpackLongY(p), pz = BlockPos.unpackLongZ(p);
+                        sx += px;
+                        sz += pz;
+                        minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+                        minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+                        minZ = Math.min(minZ, pz); maxZ = Math.max(maxZ, pz);
+                    }
                 }
-                int cx = (int) (k >> 32);
-                int cz = (int) k;
-                for (int dx = -STRUCTURE_CELL_RANGE; dx <= STRUCTURE_CELL_RANGE; dx++)
-                    for (int dz = -STRUCTURE_CELL_RANGE; dz <= STRUCTURE_CELL_RANGE; dz++)
-                        near.add(cellKeyRaw(cx + dx, cz + dz));
             }
 
-            clusters++;
+            candidates++;
             biggest = Math.max(biggest, count);
-            if (count < minBlocks) { tooSmall++; continue; }
+            if (count < minBlocks) { tooSmall++; continue; } // Zellen bleiben frei fuer andere Basen
 
+            claimed.addAll(group);
+
+            // Struktur-Marker nur in der naeheren Umgebung DIESER Base zaehlen
             int structureWeight = 0;
-            for (long nk : near) {
-                Cell c = cells.get(nk);
-                if (c == null) continue;
-                for (int w : c.structure.values()) structureWeight += w;
+            for (int cx = (minX >> CELL_SHIFT) - STRUCTURE_RANGE; cx <= (maxX >> CELL_SHIFT) + STRUCTURE_RANGE; cx++) {
+                for (int cz = (minZ >> CELL_SHIFT) - STRUCTURE_RANGE; cz <= (maxZ >> CELL_SHIFT) + STRUCTURE_RANGE; cz++) {
+                    Cell c = cells.get(cellKeyRaw(cx, cz));
+                    if (c == null) continue;
+                    for (int w : c.structure.values()) structureWeight += w;
+                }
             }
-            if (structureWeight >= STRUCTURE_LIMIT) { // Dungeon, Trial Chamber, Ancient City ...
+
+            if (structureWeight >= STRUCTURE_LIMIT) { // Trial Chamber, Ancient City, Stronghold ...
                 filtered++;
                 String msg = "Gefiltert (Struktur) bei X " + (int) (sx / count) + " Z " + (int) (sz / count)
                     + ": Bloecke=" + count + ", Struktur-Gewicht=" + structureWeight;
@@ -448,10 +481,9 @@ public class BoffoDebugModule extends Module {
         showToasts(result);
 
         if (debug.get()) {
-            String summary = "Debug: " + totalPlayer + " Spieler-Bloecke unter Y " + Y_LIMIT + ", " + clusters
-                + " Basen-Kandidaten (groesster: " + biggest + "), benoetigt: " + minBlocks
-                + ", zu klein: " + tooSmall + ", als Struktur gefiltert: " + filtered
-                + ", markiert: " + result.size();
+            String summary = "Debug: " + scannedChunks + " Chunks gescannt, " + totalPlayer + " Spieler-Bloecke unter Y "
+                + limitY + ", " + candidates + " Kandidaten (groesster: " + biggest + "), benoetigt: " + minBlocks
+                + ", zu klein: " + tooSmall + ", als Struktur gefiltert: " + filtered + ", markiert: " + result.size();
             if (!summary.equals(lastSummary)) {
                 lastSummary = summary;
                 say(summary);
@@ -469,4 +501,3 @@ public class BoffoDebugModule extends Module {
         }
     }
 }
-
