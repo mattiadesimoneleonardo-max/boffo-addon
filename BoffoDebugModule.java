@@ -2,12 +2,15 @@ package com.boffo.addon.modules;
 
 import com.boffo.addon.BoffoAddon;
 import com.boffo.addon.BoffoToast;
+import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.BlockUpdateEvent;
 import meteordevelopment.meteorclient.events.world.ChunkDataEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.ColorSetting;
+import meteordevelopment.meteorclient.settings.IntSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -19,70 +22,183 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.registry.Registries;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.World;
 import net.minecraft.world.chunk.Chunk;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
-import static meteordevelopment.meteorclient.MeteorClient.mc;
-
 /**
- * Boffo Debug: sucht unter Y = -5 nach Bloecken, die nur Spieler setzen koennen
- * (kommen nirgends natuerlich vor) und zeichnet an der Stelle einen Strahl von Y -64 bis 256.
- * Einstellungen: Farbe des Strahls und der Benachrichtigung.
+ * Boffo Debug - markiert Spieler-Basen (Stashes, Farmen) UNTER Y -10.
+ *
+ * Pro Base gibt es genau
+ *   - 1 Strahl (senkrecht, in der Mitte der Base)
+ *   - 1 durchsichtigen Kasten um die ganze Base
+ *
+ * Sensitivity (5-50) = Anzahl Spieler-Bloecke, die eine Base mindestens haben muss.
+ *   50 -> 50 Bloecke noetig, 5 -> 5 Bloecke noetig.
+ *
+ * Strukturen (Trial Chambers, Dungeons, Ancient Cities, Strongholds ...) werden
+ * ueber Marker-Bloecke erkannt und nicht markiert.
  */
 public class BoffoDebugModule extends Module {
-    private static final int MAX_Y = -6;          // "unter -5"
-    private static final int MERGE_DIST_SQ = 16 * 16; // Funde naeher als 16 Bloecke = ein Fundort
-    private static final int CHUNKS_PER_TICK = 3;
+    /** Standardwert: es zaehlen nur Bloecke mit y KLEINER als dieser Wert (einstellbar: max-y). */
+    private static final int DEFAULT_MAX_Y = -10;
 
-    private static final Set<String> EXACT = Set.of(
-        "furnace", "blast_furnace", "smoker", "ender_chest", "anvil", "chipped_anvil", "damaged_anvil",
-        "enchanting_table", "brewing_stand", "cauldron", "beacon", "hopper", "dropper", "observer",
-        "piston", "sticky_piston", "repeater", "comparator", "redstone_lamp", "redstone_wire", "note_block",
-        "jukebox", "tnt", "crafting_table", "grindstone", "stonecutter", "loom", "cartography_table",
-        "fletching_table", "smithing_table", "composter", "tripwire_hook", "target", "slime_block", "honey_block",
-        "glowstone", "daylight_detector", "glass", "iron_block", "diamond_block", "emerald_block", "lapis_block",
-        "redstone_block", "netherite_block", "coal_block", "bricks", "quartz_block", "quartz_bricks",
-        "quartz_pillar", "chiseled_quartz_block", "smooth_quartz", "end_stone_bricks", "purpur_block", "purpur_pillar"
+    private static final int CELL_SHIFT = 4;            // Zellen von 16x16 Bloecken (= 1 Chunk)
+    private static final int BASE_RADIUS = 2;           // eine Base fasst Zellen im Umkreis von 2 Zellen (~80 Bloecke) zusammen
+    private static final int STRUCTURE_LIMIT = 8;       // ab diesem Gewicht = Struktur, keine Base
+    private static final int STRUCTURE_RANGE = 3;       // Zellen um die Base, in denen Struktur-Marker zaehlen (~48 Bloecke)
+    private static final int CHUNKS_PER_TICK = 4;
+    private static final int EVAL_INTERVAL = 20;        // Ticks zwischen Auswertungen
+    private static final int BOX_PADDING = 1;           // Kasten ragt 1 Block ueber die Base hinaus
+
+    // ---- Spieler-Bloecke (koennen nicht natuerlich entstehen) ----
+    private static final Set<String> PLAYER_EXACT = Set.of(
+        // Storage / Utility
+        "chest", "trapped_chest", "barrel", "ender_chest", "furnace", "blast_furnace", "smoker",
+        "anvil", "chipped_anvil", "damaged_anvil", "enchanting_table", "brewing_stand", "cauldron",
+        "beacon", "hopper", "dropper", "dispenser", "crafting_table", "grindstone", "stonecutter",
+        "loom", "cartography_table", "fletching_table", "smithing_table", "composter", "jukebox",
+        "lodestone", "respawn_anchor", "conduit", "crafter", "spawner",
+        // Redstone / Farm-Technik
+        "observer", "piston", "sticky_piston", "repeater", "comparator", "redstone_lamp",
+        "redstone_wire", "redstone_torch", "note_block", "tnt", "tripwire_hook", "target",
+        "slime_block", "honey_block", "daylight_detector", "scaffolding", "dried_kelp_block",
+        // Farmen
+        "farmland", "wheat", "carrots", "potatoes", "beetroots", "melon_stem", "pumpkin_stem",
+        "attached_melon_stem", "attached_pumpkin_stem", "nether_wart",
+        // Bau-Bloecke
+        "glowstone", "iron_block", "diamond_block", "emerald_block", "lapis_block", "redstone_block",
+        "netherite_block", "coal_block", "bricks", "quartz_block", "quartz_bricks", "quartz_pillar",
+        "chiseled_quartz_block", "smooth_quartz"
     );
-    private static final String[] SUFFIX = {
-        "_concrete", "_concrete_powder", "_glazed_terracotta", "_bed", "shulker_box", "_stained_glass"
+    private static final String[] PLAYER_SUFFIX = {
+        "_concrete", "_concrete_powder", "_glazed_terracotta", "_bed", "shulker_box",
+        "_stained_glass", "_pressure_plate", "copper_chest"
     };
 
-    private static class Spot {
-        final int x, y, z;
-        int count = 1;
-        Spot(int x, int y, int z) { this.x = x; this.y = y; this.z = z; }
-    }
+    // ---- Struktur-Marker mit Gewicht ----
+    private static final Map<String, Integer> STRUCTURE_EXACT = Map.ofEntries(
+        // stark: nur in Strukturen moeglich (Trial Chamber, Ancient City, Stronghold ...)
+        Map.entry("trial_spawner", 8), Map.entry("vault", 8), Map.entry("heavy_core", 8),
+        Map.entry("end_portal_frame", 8), Map.entry("end_portal", 8), Map.entry("end_gateway", 8),
+        Map.entry("reinforced_deepslate", 8),
+        Map.entry("suspicious_sand", 8), Map.entry("suspicious_gravel", 8),
+        // mittel
+        Map.entry("crying_obsidian", 3), Map.entry("bell", 3), Map.entry("decorated_pot", 3),
+        Map.entry("chiseled_tuff", 3), Map.entry("tuff_bricks", 3),
+        // schwach: erst viele davon = Struktur
+        Map.entry("hay_block", 1), Map.entry("dirt_path", 1), Map.entry("copper_grate", 1),
+        Map.entry("mossy_cobblestone", 1), Map.entry("nether_bricks", 1), Map.entry("purpur_block", 1),
+        Map.entry("purpur_pillar", 1), Map.entry("end_stone_bricks", 1), Map.entry("prismarine_bricks", 1),
+        Map.entry("dark_prismarine", 1), Map.entry("sea_lantern", 1)
+    );
+    private static final String[] STRUCTURE_CONTAINS = { "copper_bulb" };  // Gewicht 1
+    private static final String[] STRUCTURE_PREFIX = { "infested_" };      // Gewicht 3
+
+    // ------------------------------------------------------------------ Einstellungen
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
 
-    private final Setting<SettingColor> beamColor = sgGeneral.add(new ColorSetting.Builder()
-        .name("beam-color").description("Farbe des Strahls.")
-        .defaultValue(new SettingColor(255, 138, 31)).build());
-    private final Setting<SettingColor> toastColor = sgGeneral.add(new ColorSetting.Builder()
-        .name("toast-color").description("Farbe der Benachrichtigung oben rechts.")
-        .defaultValue(new SettingColor(255, 138, 31)).build());
+    private final Setting<Integer> maxYSetting = sgGeneral.add(new IntSetting.Builder()
+        .name("max-y")
+        .description("Es zaehlen nur Bloecke UNTER dieser Hoehe (Y). -10 = nur tiefe Basen, 320 = die ganze Welt.")
+        .defaultValue(DEFAULT_MAX_Y)
+        .range(-64, 320)
+        .sliderRange(-64, 320)
+        .build());
 
-    private final Queue<Spot> pendingToasts = new ArrayDeque<>();
-    private int toastCooldown = 0;
+    private final Setting<Integer> sensitivity = sgGeneral.add(new IntSetting.Builder()
+        .name("sensitivity")
+        .description("So viele Spieler-Bloecke muss eine Base mindestens haben (5-50). 50 = 50 Bloecke, 5 = 5 Bloecke.")
+        .defaultValue(25)
+        .range(5, 50)
+        .sliderRange(5, 50)
+        .build());
+
+    private final Setting<SettingColor> beamColor = sgGeneral.add(new ColorSetting.Builder()
+        .name("beam-color")
+        .description("Farbe des Strahls.")
+        .defaultValue(new SettingColor(255, 60, 60))
+        .build());
+
+    private final Setting<SettingColor> boxColor = sgGeneral.add(new ColorSetting.Builder()
+        .name("box-color")
+        .description("Farbe des Kastens um die Base.")
+        .defaultValue(new SettingColor(255, 60, 60))
+        .build());
+
+    private final Setting<Integer> boxOpacity = sgGeneral.add(new IntSetting.Builder()
+        .name("box-opacity")
+        .description("Wie durchsichtig die Flaechen des Kastens sind (kleiner = durchsichtiger).")
+        .defaultValue(35)
+        .range(0, 150)
+        .sliderRange(0, 150)
+        .build());
+
+    private final Setting<SettingColor> toastColor = sgGeneral.add(new ColorSetting.Builder()
+        .name("toast-color")
+        .description("Farbe der Benachrichtigung oben rechts.")
+        .defaultValue(new SettingColor(255, 60, 60))
+        .build());
+
+    private final Setting<Boolean> debug = sgGeneral.add(new BoolSetting.Builder()
+        .name("debug-chat")
+        .description("Schreibt in den Chat, was das Modul sieht (Bloecke, Basen, gefilterte Strukturen).")
+        .defaultValue(true)
+        .build());
+
+    // ------------------------------------------------------------------ Daten
+
+    private static final class Cell {
+        final Set<Long> player = new HashSet<>();
+        final Map<Long, Integer> structure = new HashMap<>();
+        boolean empty() { return player.isEmpty() && structure.isEmpty(); }
+    }
+
+    /** Eine gefundene Base: Mitte fuer den Strahl, Grenzen fuer den Kasten. */
+    private record Base(double cx, double cz, int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {}
 
     private final Queue<Chunk> queue = new ConcurrentLinkedQueue<>();
-    private final List<Spot> spots = new ArrayList<>();
-    private final List<Spot> fresh = new ArrayList<>();
-    private final Map<Block, Boolean> cache = new HashMap<>();
-    private final BlockPos.Mutable pos = new BlockPos.Mutable();
+    private final Map<Long, Cell> cells = new HashMap<>();
+    private final Map<Block, Integer> cache = new HashMap<>();
+    private final Set<Long> toasted = new HashSet<>();
+    private List<Base> bases = new ArrayList<>();
+    private int evalTimer;
+    private int scannedChunks;
+    private int limitY = DEFAULT_MAX_Y;
+    private int scannedLimit = Integer.MIN_VALUE;
+    private String lastSummary = "";
+    private final Set<String> reportedFilters = new HashSet<>();
 
     public BoffoDebugModule() {
-        super(BoffoAddon.CATEGORY, "boffo-debug", "Boffo Debug");
+        super(BoffoAddon.CATEGORY, "boffo-debug", "Markiert Spieler-Basen mit Strahl und Kasten.");
     }
+
+    // ------------------------------------------------------------------ Chat / Fehler
+
+    private String lastError = "";
+
+    private void say(String text) {
+        info("%s", text);
+    }
+
+    private void fail(String where, Throwable t) {
+        String msg = "FEHLER in " + where + ": " + t;
+        if (!msg.equals(lastError)) {
+            lastError = msg;
+            error("%s", msg);
+        }
+        t.printStackTrace();
+    }
+
+    // ------------------------------------------------------------------ Lebenszyklus
 
     @Override
     public void onActivate() {
         reset();
-        for (Chunk chunk : Utils.chunks()) queue.add(chunk);
+        rescanAll();
+        say("Boffo Debug V2 gestartet (zaehlt Bloecke unter Y " + maxYSetting.get() + ", Sensitivity " + sensitivity.get() + ")");
     }
 
     @Override
@@ -90,117 +206,298 @@ public class BoffoDebugModule extends Module {
         reset();
     }
 
-    private void reset() {
+    /** Alles verwerfen und alle geladenen Chunks mit der aktuellen max-y neu einlesen. */
+    private void rescanAll() {
+        limitY = maxYSetting.get();
+        scannedLimit = limitY;
         queue.clear();
-        spots.clear();
-        fresh.clear();
-        pendingToasts.clear();
-        toastCooldown = 0;
+        cells.clear();
+        toasted.clear();
+        reportedFilters.clear();
+        bases = new ArrayList<>();
+        evalTimer = 0;
+        scannedChunks = 0;
+        for (Chunk chunk : Utils.chunks()) queue.add(chunk);
     }
 
     @EventHandler
+    private void onGameLeft(GameLeftEvent event) {
+        reset();
+    }
+
+    private void reset() {
+        queue.clear();
+        cells.clear();
+        toasted.clear();
+        bases = new ArrayList<>();
+        evalTimer = 0;
+        scannedChunks = 0;
+        lastSummary = "";
+        reportedFilters.clear();
+        scannedLimit = Integer.MIN_VALUE;
+    }
+
+    // ------------------------------------------------------------------ Events
+
+    @EventHandler
     private void onChunkData(ChunkDataEvent event) {
-        queue.add(event.chunk()); // kann von einem anderen Thread kommen
+        queue.add(event.chunk());
     }
 
     @EventHandler
     private void onBlockUpdate(BlockUpdateEvent event) {
-        if (!inOverworld() || event.pos.getY() > MAX_Y) return;
-        if (isPlayerOnly(event.newState.getBlock())) {
-            addFind(event.pos.getX(), event.pos.getY(), event.pos.getZ());
+        try {
+            BlockPos pos = event.pos;
+            if (pos.getY() >= limitY) return;
+            removeAt(pos);
+            add(pos.getX(), pos.getY(), pos.getZ(), event.newState.getBlock());
+        } catch (Throwable t) {
+            fail("onBlockUpdate", t);
         }
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        if (!inOverworld()) {
-            queue.clear();
-            return;
-        }
+        if (mc.world == null || mc.player == null) return;
+        try {
+            if (scannedLimit != maxYSetting.get()) {
+                rescanAll(); // max-y wurde geaendert
+                lastSummary = "";
+            }
+            for (int i = 0; i < CHUNKS_PER_TICK; i++) {
+                Chunk chunk = queue.poll();
+                if (chunk == null) break;
+                scan(chunk);
+            }
 
-        for (int i = 0; i < CHUNKS_PER_TICK; i++) {
-            Chunk chunk = queue.poll();
-            if (chunk == null) break;
-            scan(chunk);
+            // normalerweise erst auswerten, wenn alle Chunks gescannt sind (Struktur-Marker in
+            // Nachbar-Chunks); dauert das Scannen sehr lange, wird trotzdem alle 10 s ausgewertet
+            evalTimer++;
+            boolean scanning = !queue.isEmpty();
+            if (scanning && evalTimer < 200) return;
+            if (!scanning && evalTimer < EVAL_INTERVAL) return;
+            evalTimer = 0;
+            evaluate();
+        } catch (Throwable t) {
+            fail("onTick", t);
         }
-
-        flushToast();
     }
 
-    private boolean inOverworld() {
-        return mc.world != null && mc.player != null && mc.world.getRegistryKey() == World.OVERWORLD;
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (mc.world == null || bases.isEmpty()) return;
+        try {
+            renderBases(event);
+        } catch (Throwable t) {
+            fail("onRender", t);
+        }
     }
+
+    private void renderBases(Render3DEvent event) {
+        SettingColor beam = beamColor.get();
+        SettingColor box = boxColor.get();
+        Color beamSide = new Color(beam.r, beam.g, beam.b, 90);
+        Color beamLine = new Color(beam.r, beam.g, beam.b, 255);
+        Color boxSide = new Color(box.r, box.g, box.b, boxOpacity.get());
+        Color boxLine = new Color(box.r, box.g, box.b, 220);
+
+        double bottom = mc.world.getBottomY();
+        double top = bottom + mc.world.getHeight();
+
+        for (Base b : bases) {
+            // durchsichtiger Kasten um die ganze Base
+            event.renderer.box(
+                b.minX() - BOX_PADDING, b.minY() - BOX_PADDING, b.minZ() - BOX_PADDING,
+                b.maxX() + 1 + BOX_PADDING, b.maxY() + 1 + BOX_PADDING, b.maxZ() + 1 + BOX_PADDING,
+                boxSide, boxLine, ShapeMode.Both, 0);
+
+            // 1 Strahl pro Base
+            event.renderer.box(
+                b.cx() - 0.5, bottom, b.cz() - 0.5,
+                b.cx() + 0.5, top, b.cz() + 0.5,
+                beamSide, beamLine, ShapeMode.Both, 0);
+        }
+    }
+
+    // ------------------------------------------------------------------ Scan
 
     private void scan(Chunk chunk) {
-        int bx = chunk.getPos().x * 16, bz = chunk.getPos().z * 16;
-        int minY = Math.max(chunk.getBottomY(), -64);
+        int chunkX = chunk.getPos().x;
+        int chunkZ = chunk.getPos().z;
+        removeChunk(chunkX, chunkZ);
+        scannedChunks++;
+
+        int baseX = chunkX << 4;
+        int baseZ = chunkZ << 4;
+        int bottom = chunk.getBottomY();
+        BlockPos.Mutable pos = new BlockPos.Mutable();
 
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
-                for (int y = minY; y <= MAX_Y; y++) {
-                    pos.set(bx + x, y, bz + z);
+                for (int y = bottom; y < limitY; y++) { // nur y < max-y
+                    pos.set(baseX + x, y, baseZ + z);
                     BlockState state = chunk.getBlockState(pos);
                     if (state.isAir()) continue;
-                    if (isPlayerOnly(state.getBlock())) addFind(pos.getX(), pos.getY(), pos.getZ());
+                    add(baseX + x, y, baseZ + z, state.getBlock());
                 }
             }
         }
     }
 
-    private void addFind(int x, int y, int z) {
-        for (Spot spot : spots) {
-            int dx = spot.x - x, dz = spot.z - z;
-            if (dx * dx + dz * dz <= MERGE_DIST_SQ) {
-                spot.count++;
-                return;
-            }
-        }
-        Spot spot = new Spot(x, y, z);
-        spots.add(spot);
-        fresh.add(spot);
-    }
-
-    /** Pro neuem Fundort eine Benachrichtigung mit dessen Koordinaten (hoechstens eine alle 0,5 Sekunden). */
-    private void flushToast() {
-        pendingToasts.addAll(fresh);
-        fresh.clear();
-
-        if (toastCooldown > 0) toastCooldown--;
-        if (toastCooldown > 0 || pendingToasts.isEmpty()) return;
-
-        Spot spot = pendingToasts.poll();
-        SettingColor c = toastColor.get();
-        String coords = "X " + spot.x + "  Y " + spot.y + "  Z " + spot.z;
-        mc.getToastManager().add(new BoffoToast("Boffo Debug V1", coords, c.r, c.g, c.b));
-        toastCooldown = 10;
-    }
-
-    private boolean isPlayerOnly(Block block) {
+    /** -1 = Spieler-Block, 0 = egal, groesser 0 = Struktur-Marker (Gewicht). */
+    private int classify(Block block) {
         return cache.computeIfAbsent(block, b -> {
             String path = Registries.BLOCK.getId(b).getPath();
-            if (EXACT.contains(path)) return true;
-            for (String suffix : SUFFIX) if (path.endsWith(suffix)) return true;
-            return false;
+
+            Integer w = STRUCTURE_EXACT.get(path);
+            if (w != null) return w;
+            for (String part : STRUCTURE_CONTAINS) if (path.contains(part)) return 1;
+            for (String prefix : STRUCTURE_PREFIX) if (path.startsWith(prefix)) return 3;
+
+            if (PLAYER_EXACT.contains(path)) return -1;
+            for (String suffix : PLAYER_SUFFIX) if (path.endsWith(suffix)) return -1;
+            return 0;
         });
     }
 
-    @EventHandler
-    private void onRender(Render3DEvent event) {
-        if (spots.isEmpty() || !inOverworld()) return;
+    private static long cellKey(int x, int z) {
+        return (((long) (x >> CELL_SHIFT)) << 32) | ((z >> CELL_SHIFT) & 0xFFFFFFFFL);
+    }
 
-        SettingColor c = beamColor.get();
-        Color side = new Color(c.r, c.g, c.b, 70);
-        Color line = new Color(Math.min(255, c.r + 40), Math.min(255, c.g + 40), Math.min(255, c.b + 40), 255);
-        Color core = new Color((c.r + 255 * 2) / 3, (c.g + 255 * 2) / 3, (c.b + 255 * 2) / 3, 200);
+    private static long cellKeyRaw(int cx, int cz) {
+        return (((long) cx) << 32) | (cz & 0xFFFFFFFFL);
+    }
 
-        for (Spot spot : spots) {
-            double cx = spot.x + 0.5, cz = spot.z + 0.5;
-            // breiter Strahl durch die ganze Welt
-            event.renderer.box(cx - 0.3, -64, cz - 0.3, cx + 0.3, 256, cz + 0.3, side, line, ShapeMode.Both, 0);
-            // heller Kern
-            event.renderer.box(cx - 0.08, -64, cz - 0.08, cx + 0.08, 256, cz + 0.08, core, core, ShapeMode.Sides, 0);
-            // Markierung am Fund selbst
-            event.renderer.box(spot.x, spot.y, spot.z, spot.x + 1, spot.y + 1, spot.z + 1, side, line, ShapeMode.Both, 0);
+    private void add(int x, int y, int z, Block block) {
+        if (y >= limitY) return;
+        int type = classify(block);
+        if (type == 0) return;
+        Cell cell = cells.computeIfAbsent(cellKey(x, z), k -> new Cell());
+        long pos = BlockPos.asLong(x, y, z);
+        if (type < 0) cell.player.add(pos);
+        else cell.structure.put(pos, type);
+    }
+
+    private void removeAt(BlockPos pos) {
+        long key = cellKey(pos.getX(), pos.getZ());
+        Cell cell = cells.get(key);
+        if (cell == null) return;
+        long p = pos.asLong();
+        cell.player.remove(p);
+        cell.structure.remove(p);
+        if (cell.empty()) cells.remove(key);
+    }
+
+    private void removeChunk(int chunkX, int chunkZ) {
+        // ein Chunk liegt immer komplett in genau einer 32er-Zelle
+        long key = cellKey(chunkX << 4, chunkZ << 4);
+        Cell cell = cells.get(key);
+        if (cell == null) return;
+        cell.player.removeIf(p -> (BlockPos.unpackLongX(p) >> 4) == chunkX && (BlockPos.unpackLongZ(p) >> 4) == chunkZ);
+        cell.structure.keySet().removeIf(p -> (BlockPos.unpackLongX(p) >> 4) == chunkX && (BlockPos.unpackLongZ(p) >> 4) == chunkZ);
+        if (cell.empty()) cells.remove(key);
+    }
+
+    // ------------------------------------------------------------------ Auswertung
+
+    private void evaluate() {
+        int minBlocks = sensitivity.get(); // 50 -> 50 Bloecke, 5 -> 5 Bloecke
+
+        // Zellen mit Spieler-Bloecken, die dichteste zuerst: jede wird zum Mittelpunkt einer Base
+        List<Map.Entry<Long, Cell>> seeds = new ArrayList<>();
+        int totalPlayer = 0;
+        for (Map.Entry<Long, Cell> e : cells.entrySet()) {
+            int n = e.getValue().player.size();
+            if (n == 0) continue;
+            totalPlayer += n;
+            seeds.add(e);
+        }
+        seeds.sort((x, y) -> Integer.compare(y.getValue().player.size(), x.getValue().player.size()));
+
+        Set<Long> claimed = new HashSet<>();
+        List<Base> result = new ArrayList<>();
+        int candidates = 0, tooSmall = 0, filtered = 0, biggest = 0;
+
+        for (Map.Entry<Long, Cell> seed : seeds) {
+            long sk = seed.getKey();
+            if (claimed.contains(sk)) continue;
+            int scx = (int) (sk >> 32);
+            int scz = (int) sk;
+
+            // Base = Zellen im Umkreis um die dichteste Zelle (begrenzte Groesse, damit nicht
+            // eine ganze Gegend mit vielen Basen zu EINEM Riesen-Cluster verschmilzt)
+            List<Long> group = new ArrayList<>();
+            int count = 0;
+            double sx = 0, sz = 0;
+            int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+            int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+
+            for (int dx = -BASE_RADIUS; dx <= BASE_RADIUS; dx++) {
+                for (int dz = -BASE_RADIUS; dz <= BASE_RADIUS; dz++) {
+                    long nk = cellKeyRaw(scx + dx, scz + dz);
+                    Cell cell = cells.get(nk);
+                    if (cell == null || cell.player.isEmpty() || claimed.contains(nk)) continue;
+                    group.add(nk);
+                    count += cell.player.size();
+                    for (long p : cell.player) {
+                        int px = BlockPos.unpackLongX(p), py = BlockPos.unpackLongY(p), pz = BlockPos.unpackLongZ(p);
+                        sx += px;
+                        sz += pz;
+                        minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+                        minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+                        minZ = Math.min(minZ, pz); maxZ = Math.max(maxZ, pz);
+                    }
+                }
+            }
+
+            candidates++;
+            biggest = Math.max(biggest, count);
+            if (count < minBlocks) { tooSmall++; continue; } // Zellen bleiben frei fuer andere Basen
+
+            claimed.addAll(group);
+
+            // Struktur-Marker nur in der naeheren Umgebung DIESER Base zaehlen
+            int structureWeight = 0;
+            for (int cx = (minX >> CELL_SHIFT) - STRUCTURE_RANGE; cx <= (maxX >> CELL_SHIFT) + STRUCTURE_RANGE; cx++) {
+                for (int cz = (minZ >> CELL_SHIFT) - STRUCTURE_RANGE; cz <= (maxZ >> CELL_SHIFT) + STRUCTURE_RANGE; cz++) {
+                    Cell c = cells.get(cellKeyRaw(cx, cz));
+                    if (c == null) continue;
+                    for (int w : c.structure.values()) structureWeight += w;
+                }
+            }
+
+            if (structureWeight >= STRUCTURE_LIMIT) { // Trial Chamber, Ancient City, Stronghold ...
+                filtered++;
+                String msg = "Gefiltert (Struktur) bei X " + (int) (sx / count) + " Z " + (int) (sz / count)
+                    + ": Bloecke=" + count + ", Struktur-Gewicht=" + structureWeight;
+                if (debug.get() && reportedFilters.add(msg)) say(msg);
+                continue;
+            }
+
+            result.add(new Base(sx / count + 0.5, sz / count + 0.5, minX, minY, minZ, maxX, maxY, maxZ));
+        }
+
+        bases = result;
+        showToasts(result);
+
+        if (debug.get()) {
+            String summary = "Debug: " + scannedChunks + " Chunks gescannt, " + totalPlayer + " Spieler-Bloecke unter Y "
+                + limitY + ", " + candidates + " Kandidaten (groesster: " + biggest + "), benoetigt: " + minBlocks
+                + ", zu klein: " + tooSmall + ", als Struktur gefiltert: " + filtered + ", markiert: " + result.size();
+            if (!summary.equals(lastSummary)) {
+                lastSummary = summary;
+                say(summary);
+            }
+        }
+    }
+
+    private void showToasts(List<Base> found) {
+        SettingColor c = toastColor.get();
+        for (Base b : found) {
+            long key = (((long) ((int) b.cx() >> 4)) << 32) | (((int) b.cz() >> 4) & 0xFFFFFFFFL);
+            if (!toasted.add(key)) continue;
+            String coords = (int) b.cx() + "  Y " + b.minY() + "  Z " + (int) b.cz();
+            mc.getToastManager().add(new BoffoToast("Boffo Debug V2", coords, c.r, c.g, c.b));
         }
     }
 }
