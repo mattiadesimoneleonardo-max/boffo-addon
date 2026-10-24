@@ -2,6 +2,7 @@ package com.boffo.addon;
 
 import com.boffo.addon.commands.RelogsCommand;
 import com.boffo.addon.hud.RelogCounterHud;
+import com.boffo.addon.modules.BoffoDebugModule;
 import com.boffo.addon.modules.RelogsModule;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
@@ -17,10 +18,9 @@ public class BoffoAddon extends MeteorAddon {
 
     @Override
     public void onInitialize() {
-        // Der Tracker laeuft immer im Hintergrund, auch wenn das Modul aus ist.
         MeteorClient.EVENT_BUS.subscribe(RelogTracker.INSTANCE);
-
         Modules.get().add(new RelogsModule());
+        Modules.get().add(new BoffoDebugModule());
         Hud.get().register(RelogCounterHud.INFO);
         Commands.add(new RelogsCommand());
     }
