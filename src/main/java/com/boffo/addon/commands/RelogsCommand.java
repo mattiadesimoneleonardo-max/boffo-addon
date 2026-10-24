@@ -22,6 +22,10 @@ public class RelogsCommand extends Command {
             RelogTracker.INSTANCE.resetCurrent();
             info("Relogs fuer diesen Server zurueckgesetzt.");
             return SINGLE_SUCCESS;
-        }));
+        }).then(literal("all").executes(ctx -> {
+            RelogTracker.INSTANCE.resetAll();
+            info("Relogs fuer alle Server zurueckgesetzt.");
+            return SINGLE_SUCCESS;
+        })));
     }
 }
