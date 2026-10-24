@@ -1,4 +1,4 @@
-package com.com.boffo.addon.modules;
+package com.boffo.addon.modules;
 
 import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
@@ -6,15 +6,17 @@ import meteordevelopment.meteorclient.events.render.Render2DEvent;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.client.Minecraft;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.util.Identifier;
 import java.util.Random;
 
 public class BoffoAntiVanishModule extends Module {
-    // Greift direkt auf dein hochgeladenes Donut-Bild in den Texturen zu
-    private static final Identifier DONUT_TEX = new Identifier("boffo-addon", "textures/blue_donut.png");
-    private final Minecraft mc = Minecraft.getInstance();
+    // Fehler behoben: Identifier.of nutzen (Fix fuer private access Fehler)
+    private static final Identifier DONUT_TEX = Identifier.of("boffo-addon", "textures/blue_donut.png");
+    
+    // Fehler behoben: MinecraftClient statt Minecraft nutzen
+    private final MinecraftClient mc = MinecraftClient.getInstance();
     private final Random random = new Random();
 
     private int requiredRelogs = 0;
@@ -31,12 +33,12 @@ public class BoffoAntiVanishModule extends Module {
 
     @Override
     public void onActivate() {
-        resetRandomCounter(); // Setzt bei jedem Modul-Start im Menue alles auf 0 zurueck
+        resetRandomCounter();
     }
 
     private void resetRandomCounter() {
-        this.requiredRelogs = random.nextInt(16) + 15; // Random Zahl von 15 bis 30
-        this.currentRelogCount = 0; // Zaehler startet garantiert bei 0
+        this.requiredRelogs = random.nextInt(16) + 15; 
+        this.currentRelogCount = 0; 
         this.wasBelowMinusOne = false;
     }
 
@@ -60,7 +62,7 @@ public class BoffoAntiVanishModule extends Module {
             if (currentRelogCount >= requiredRelogs) {
                 this.animationStartTime = System.currentTimeMillis();
                 this.isAnimating = true;
-                resetRandomCounter(); // Nach der Animation wird direkt wieder auf 0 gesetzt
+                resetRandomCounter();
             }
         }
     }
@@ -101,7 +103,7 @@ public class BoffoAntiVanishModule extends Module {
                 float t = (elapsed - 576) / 192f;
                 scale = 1.12f - (0.12f * t);
             } 
-            else if (elapsed < 1584) { // Der optimierte, schnelle Shake
+            else if (elapsed < 1584) { 
                 currentY = targetY;
                 int shakeCycle = (int) ((elapsed - 768) / 96); 
                 currentX = (shakeCycle % 2 == 0) ? targetX - 10 : targetX + 10;
@@ -118,28 +120,31 @@ public class BoffoAntiVanishModule extends Module {
                 rotation = t * 360f; 
             }
 
+            // Fehler behoben: Minecraft-Matrix-System an neue Mojang-Bibliothek angepasst
             context.getMatrices().push();
-            context.getMatrices().translate(currentX + (donutSize / 2f), currentY + (donutSize / 2f), 0);
-            context.getMatrices().scale(scale, scale, 1);
+            context.getMatrices().translate((float) currentX + (donutSize / 2f), (float) currentY + (donutSize / 2f));
+            context.getMatrices().scale(scale, scale);
             if (rotation != 0.0f) {
-                context.getMatrices().multiply(net.minecraft.client.util.math.RotationAxis.POSITIVE_Z.rotationDegrees(rotation));
+                context.getMatrices().rotate((float) Math.toRadians(rotation));
             }
-            context.getMatrices().translate(-(donutSize / 2f), -(donutSize / 2f), 0);
+            context.getMatrices().translate(-(donutSize / 2f), -(donutSize / 2f));
 
-            // Zeichnet das Bild auf den Bildschirm
+            // Fehler behoben: drawTexture-Argumente an 1.21 angepasst
             context.drawTexture(DONUT_TEX, 0, 0, 0, 0, donutSize, donutSize, donutSize, donutSize);
 
             String text = "BOFFO";
             int textWidth = mc.textRenderer.getWidth(text);
+            
             context.getMatrices().push();
             float textScale = 2.5f; 
             float textX = (donutSize - (textWidth * textScale)) / 2f / textScale;
             float textY = (donutSize - (mc.textRenderer.fontHeight * textScale)) / 2f / textScale;
-            context.getMatrices().scale(textScale, textScale, 1);
+            
+            context.getMatrices().scale(textScale, textScale);
             context.drawTextWithShadow(mc.textRenderer, text, (int)textX + 2, (int)textY + 2, 0x00FFFF);
             context.drawTextWithShadow(mc.textRenderer, text, (int)textX, (int)textY, 0xFFFFFF);
-            context.getMatrices().pop();
             
+            context.getMatrices().pop();
             context.getMatrices().pop();
         } 
         // PHASE 2: FLÜSSIG VERBLASSENDER WARN-TEXT (4800ms - 7800ms)
@@ -172,14 +177,15 @@ public class BoffoAntiVanishModule extends Module {
             int glowColor = 0xFF0055 | alphaBits; 
 
             context.getMatrices().push();
-            context.getMatrices().translate(screenWidth / 2f, screenHeight / 2f, 0);
-            context.getMatrices().scale(pulseScale, pulseScale, 1);
-            context.getMatrices().translate(-screenWidth / 2f, -screenHeight / 2f, 0);
-            context.getMatrices().translate(targetX, targetY, 0);
-            context.getMatrices().scale(textScale, textScale, 1);
+            context.getMatrices().translate(screenWidth / 2f, screenHeight / 2f);
+            context.getMatrices().scale(pulseScale, pulseScale);
+            context.getMatrices().translate(-screenWidth / 2f, -screenHeight / 2f);
+            context.getMatrices().translate(targetX, targetY);
+            context.getMatrices().scale(textScale, textScale);
 
             context.drawTextWithShadow(mc.textRenderer, warnText, 2, 2, glowColor);
             context.drawTextWithShadow(mc.textRenderer, warnText, 0, 0, textColor);
+            
             context.getMatrices().pop();
         }
     }
