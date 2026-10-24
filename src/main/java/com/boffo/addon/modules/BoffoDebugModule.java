@@ -20,7 +20,7 @@ import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
-import net.minecraft.registry.Registries;
+import net.minecraft.registry.Registries;A
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.chunk.Chunk;
 
