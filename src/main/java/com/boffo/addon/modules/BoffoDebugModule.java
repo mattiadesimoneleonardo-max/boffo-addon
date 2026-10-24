@@ -26,23 +26,23 @@ import net.minecraft.world.chunk.ChunkSection;
 import java.util.*;
 
 /**
- * Boffo Debug – markiert NUR Spieler-Basen (1 Strahl pro Base).
+ * Boffo Debug â€“ markiert NUR Spieler-Basen (1 Strahl pro Base).
  *
  * Prinzip:
- *  1. "Spieler-Blöcke" (Storage, Redstone, Beton, Betten ...) werden gezählt.
- *  2. "Struktur-Marker" (Spawner, Vault, Glocke, Pfad-Blöcke, Sculk, ...) haben ein Gewicht.
- *     Liegt in der Nähe eines Clusters genug Struktur-Gewicht, ist es ein Village /
+ *  1. "Spieler-BlÃ¶cke" (Storage, Redstone, Beton, Betten ...) werden gezÃ¤hlt.
+ *  2. "Struktur-Marker" (Spawner, Vault, Glocke, Pfad-BlÃ¶cke, Sculk, ...) haben ein Gewicht.
+ *     Liegt in der NÃ¤he eines Clusters genug Struktur-Gewicht, ist es ein Village /
  *     Trial Chamber / Dungeon / etc. und wird NICHT markiert.
- *  3. Sensitivity 5-50: je höher, desto weniger Blöcke braucht ein Cluster (55 - sensitivity).
+ *  3. Sensitivity 5-50: je hÃ¶her, desto weniger BlÃ¶cke braucht ein Cluster (55 - sensitivity).
  */
 public class BoffoDebugModule extends Module {
-    private static final int CELL_SHIFT = 5;          // Zellen 32x32 Blöcke
-    private static final int STRUCTURE_LIMIT = 3;     // ab diesem Gewicht = Struktur, keine Base
-    private static final int STRUCTURE_CELL_RANGE = 2; // Zellen um den Cluster, in denen Marker zählen
+    private static final int CELL_SHIFT = 5;          // Zellen 32x32 BlÃ¶cke
+    private static final int STRUCTURE_LIMIT = 8;     // ab diesem Gewicht = Struktur, keine Base
+    private static final int STRUCTURE_CELL_RANGE = 2; // Zellen um den Cluster, in denen Marker zÃ¤hlen
     private static final int CHUNKS_PER_TICK = 2;
     private static final int EVAL_INTERVAL = 20;
 
-    // ---- Spieler-Blöcke (können nicht natürlich entstehen) ----
+    // ---- Spieler-BlÃ¶cke (kÃ¶nnen nicht natÃ¼rlich entstehen) ----
     private static final Set<String> PLAYER_EXACT = Set.of(
         "chest", "trapped_chest", "barrel", "ender_chest", "furnace", "blast_furnace", "smoker",
         "anvil", "chipped_anvil", "damaged_anvil", "enchanting_table", "brewing_stand", "cauldron",
@@ -53,26 +53,34 @@ public class BoffoDebugModule extends Module {
         "honey_block", "glowstone", "daylight_detector", "scaffolding", "iron_block", "diamond_block",
         "emerald_block", "lapis_block", "redstone_block", "netherite_block", "coal_block", "bricks",
         "quartz_block", "quartz_bricks", "quartz_pillar", "chiseled_quartz_block", "smooth_quartz",
-        "crafter"
+        "crafter", "spawner",
+        // Farmen
+        "farmland", "wheat", "carrots", "potatoes", "beetroots", "melon_stem", "pumpkin_stem",
+        "attached_melon_stem", "attached_pumpkin_stem", "nether_wart", "dried_kelp_block",
+        "lodestone", "respawn_anchor", "conduit"
     );
     private static final String[] PLAYER_SUFFIX = {
         "_concrete", "_concrete_powder", "_glazed_terracotta", "_bed", "shulker_box",
-        "_stained_glass", "_pressure_plate"
+        "_stained_glass", "_pressure_plate", "copper_chest"
     };
 
     // ---- Struktur-Marker mit Gewicht ----
     private static final Map<String, Integer> STRUCTURE_EXACT = Map.ofEntries(
-        Map.entry("spawner", 4), Map.entry("trial_spawner", 4), Map.entry("vault", 4),
-        Map.entry("end_portal_frame", 4), Map.entry("end_portal", 4), Map.entry("end_gateway", 4),
-        Map.entry("reinforced_deepslate", 2), Map.entry("sculk_shrieker", 4), Map.entry("sculk_catalyst", 4),
+        // stark: nur in Strukturen moeglich
+        Map.entry("trial_spawner", 8), Map.entry("vault", 8), Map.entry("heavy_core", 8),
+        Map.entry("end_portal_frame", 8), Map.entry("end_portal", 8), Map.entry("end_gateway", 8),
+        Map.entry("sculk_shrieker", 8), Map.entry("sculk_catalyst", 8),
+        Map.entry("suspicious_sand", 8), Map.entry("suspicious_gravel", 8),
+        // mittel
+        Map.entry("reinforced_deepslate", 3), Map.entry("crying_obsidian", 3), Map.entry("bell", 3),
+        Map.entry("decorated_pot", 3), Map.entry("chiseled_tuff", 3), Map.entry("tuff_bricks", 3),
+        // schwach: viele davon = Struktur (Village, Dungeon, Mineshaft, Ancient City ...)
         Map.entry("sculk_sensor", 1), Map.entry("calibrated_sculk_sensor", 1), Map.entry("sculk", 1),
-        Map.entry("sculk_vein", 1), Map.entry("suspicious_sand", 4), Map.entry("suspicious_gravel", 4),
-        Map.entry("crying_obsidian", 2), Map.entry("bell", 2), Map.entry("hay_block", 1),
-        Map.entry("dirt_path", 1), Map.entry("cobweb", 1), Map.entry("chiseled_tuff", 1),
-        Map.entry("tuff_bricks", 1), Map.entry("copper_grate", 1), Map.entry("decorated_pot", 2),
-        Map.entry("mossy_cobblestone", 1), Map.entry("nether_bricks", 1), Map.entry("purpur_block", 1),
-        Map.entry("purpur_pillar", 1), Map.entry("end_stone_bricks", 1), Map.entry("prismarine_bricks", 1),
-        Map.entry("dark_prismarine", 1), Map.entry("sea_lantern", 1), Map.entry("heavy_core", 4)
+        Map.entry("sculk_vein", 1), Map.entry("hay_block", 1), Map.entry("dirt_path", 1),
+        Map.entry("cobweb", 1), Map.entry("copper_grate", 1), Map.entry("mossy_cobblestone", 1),
+        Map.entry("nether_bricks", 1), Map.entry("purpur_block", 1), Map.entry("purpur_pillar", 1),
+        Map.entry("end_stone_bricks", 1), Map.entry("prismarine_bricks", 1),
+        Map.entry("dark_prismarine", 1), Map.entry("sea_lantern", 1)
     );
     private static final String[] STRUCTURE_CONTAINS = { "copper_bulb" };       // Gewicht 1
     private static final String[] STRUCTURE_PREFIX = { "infested_" };           // Gewicht 2
@@ -151,7 +159,6 @@ public class BoffoDebugModule extends Module {
 
     @EventHandler
     private void onBlockUpdate(BlockUpdateEvent event) {
-        if (!inOverworld()) return;
         BlockPos pos = event.pos;
         removeAt(pos);
         add(pos.getX(), pos.getY(), pos.getZ(), event.newState.getBlock());
@@ -160,7 +167,6 @@ public class BoffoDebugModule extends Module {
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.world == null || mc.player == null) return;
-        if (!inOverworld()) return;
 
         for (int i = 0; i < CHUNKS_PER_TICK; i++) {
             Chunk chunk = queue.poll();
@@ -226,7 +232,7 @@ public class BoffoDebugModule extends Module {
             Integer w = STRUCTURE_EXACT.get(path);
             if (w != null) return w;
             for (String part : STRUCTURE_CONTAINS) if (path.contains(part)) return 1;
-            for (String prefix : STRUCTURE_PREFIX) if (path.startsWith(prefix)) return 2;
+            for (String prefix : STRUCTURE_PREFIX) if (path.startsWith(prefix)) return 3;
 
             if (PLAYER_EXACT.contains(path)) return -1;
             for (String suffix : PLAYER_SUFFIX) if (path.endsWith(suffix)) return -1;
@@ -274,7 +280,7 @@ public class BoffoDebugModule extends Module {
     // ------------------------------------------------------------------ Auswertung
 
     private void evaluate() {
-        int minBlocks = 55 - sensitivity.get(); // 5 -> 50 Blöcke, 50 -> 5 Blöcke
+        int minBlocks = 55 - sensitivity.get(); // 5 -> 50 BlÃ¶cke, 50 -> 5 BlÃ¶cke
 
         Set<Long> visited = new HashSet<>();
         List<Beam> result = new ArrayList<>();
@@ -283,7 +289,7 @@ public class BoffoDebugModule extends Module {
             long start = entry.getKey();
             if (entry.getValue().player.isEmpty() || visited.contains(start)) continue;
 
-            // Cluster = zusammenhängende Zellen mit Spieler-Blöcken
+            // Cluster = zusammenhÃ¤ngende Zellen mit Spieler-BlÃ¶cken
             List<Long> comp = new ArrayList<>();
             ArrayDeque<Long> todo = new ArrayDeque<>();
             todo.add(start);
@@ -350,3 +356,4 @@ public class BoffoDebugModule extends Module {
         }
     }
 }
+
