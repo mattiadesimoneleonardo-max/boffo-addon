@@ -23,7 +23,6 @@ import net.minecraft.block.BlockState;
 import net.minecraft.registry.Registries;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.chunk.Chunk;
-import net.minecraft.world.chunk.ChunkSection;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -48,7 +47,7 @@ public class BoffoDebugModule extends Module {
     private static final int CELL_SHIFT = 5;            // Zellen von 32x32 Bloecken
     private static final int STRUCTURE_LIMIT = 8;       // ab diesem Gewicht = Struktur, keine Base
     private static final int STRUCTURE_CELL_RANGE = 2;  // Zellen um die Base, in denen Marker zaehlen
-    private static final int CHUNKS_PER_TICK = 2;
+    private static final int CHUNKS_PER_TICK = 4;
     private static final int EVAL_INTERVAL = 20;        // Ticks zwischen Auswertungen
     private static final int BOX_PADDING = 1;           // Kasten ragt 1 Block ueber die Base hinaus
 
@@ -160,9 +159,27 @@ public class BoffoDebugModule extends Module {
     private List<Base> bases = new ArrayList<>();
     private int evalTimer;
     private String lastSummary = "";
+    private final Set<String> reportedFilters = new HashSet<>();
 
     public BoffoDebugModule() {
         super(BoffoAddon.CATEGORY, "boffo-debug", "Markiert Spieler-Basen unter Y -10 mit Strahl und Kasten.");
+    }
+
+    // ------------------------------------------------------------------ Chat / Fehler
+
+    private String lastError = "";
+
+    private void say(String text) {
+        info("%s", text);
+    }
+
+    private void fail(String where, Throwable t) {
+        String msg = "FEHLER in " + where + ": " + t;
+        if (!msg.equals(lastError)) {
+            lastError = msg;
+            error("%s", msg);
+        }
+        t.printStackTrace();
     }
 
     // ------------------------------------------------------------------ Lebenszyklus
@@ -171,6 +188,7 @@ public class BoffoDebugModule extends Module {
     public void onActivate() {
         reset();
         for (Chunk chunk : Utils.chunks()) queue.add(chunk);
+        say("Boffo Debug V2 gestartet (nur Y unter " + Y_LIMIT + ", Sensitivity " + sensitivity.get() + ")");
     }
 
     @Override
@@ -190,45 +208,60 @@ public class BoffoDebugModule extends Module {
         bases = new ArrayList<>();
         evalTimer = 0;
         lastSummary = "";
+        reportedFilters.clear();
     }
 
     // ------------------------------------------------------------------ Events
 
     @EventHandler
     private void onChunkData(ChunkDataEvent event) {
-        queue.add(event.chunk()); // falls Compile-Fehler: event.chunk statt event.chunk()
+        queue.add(event.chunk());
     }
 
     @EventHandler
     private void onBlockUpdate(BlockUpdateEvent event) {
-        BlockPos pos = event.pos;
-        if (pos.getY() >= Y_LIMIT) return;
-        removeAt(pos);
-        add(pos.getX(), pos.getY(), pos.getZ(), event.newState.getBlock());
+        try {
+            BlockPos pos = event.pos;
+            if (pos.getY() >= Y_LIMIT) return;
+            removeAt(pos);
+            add(pos.getX(), pos.getY(), pos.getZ(), event.newState.getBlock());
+        } catch (Throwable t) {
+            fail("onBlockUpdate", t);
+        }
     }
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
         if (mc.world == null || mc.player == null) return;
+        try {
+            for (int i = 0; i < CHUNKS_PER_TICK; i++) {
+                Chunk chunk = queue.poll();
+                if (chunk == null) break;
+                scan(chunk);
+            }
 
-        for (int i = 0; i < CHUNKS_PER_TICK; i++) {
-            Chunk chunk = queue.poll();
-            if (chunk == null) break;
-            scan(chunk);
+            // erst auswerten, wenn alle Chunks gescannt sind, damit Struktur-Marker
+            // in Nachbar-Chunks schon bekannt sind
+            if (!queue.isEmpty()) return;
+            if (++evalTimer < EVAL_INTERVAL) return;
+            evalTimer = 0;
+            evaluate();
+        } catch (Throwable t) {
+            fail("onTick", t);
         }
-
-        // erst auswerten, wenn alle Chunks gescannt sind, damit Struktur-Marker
-        // in Nachbar-Chunks schon bekannt sind
-        if (!queue.isEmpty()) return;
-        if (++evalTimer < EVAL_INTERVAL) return;
-        evalTimer = 0;
-        evaluate();
     }
 
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (mc.world == null || bases.isEmpty()) return;
+        try {
+            renderBases(event);
+        } catch (Throwable t) {
+            fail("onRender", t);
+        }
+    }
 
+    private void renderBases(Render3DEvent event) {
         SettingColor beam = beamColor.get();
         SettingColor box = boxColor.get();
         Color beamSide = new Color(beam.r, beam.g, beam.b, 90);
@@ -257,28 +290,22 @@ public class BoffoDebugModule extends Module {
     // ------------------------------------------------------------------ Scan
 
     private void scan(Chunk chunk) {
-        removeChunk(chunk.getPos().x, chunk.getPos().z);
+        int chunkX = chunk.getPos().x;
+        int chunkZ = chunk.getPos().z;
+        removeChunk(chunkX, chunkZ);
 
-        ChunkSection[] sections = chunk.getSectionArray();
-        int baseX = chunk.getPos().getStartX();
-        int baseZ = chunk.getPos().getStartZ();
+        int baseX = chunkX << 4;
+        int baseZ = chunkZ << 4;
+        int bottom = chunk.getBottomY();
+        BlockPos.Mutable pos = new BlockPos.Mutable();
 
-        for (int i = 0; i < sections.length; i++) {
-            int baseY = chunk.getBottomY() + i * 16;
-            if (baseY >= Y_LIMIT) continue; // Sektion komplett ueber dem Limit
-
-            ChunkSection section = sections[i];
-            if (section == null || section.isEmpty()) continue;
-            if (!section.hasAny(s -> classify(s.getBlock()) != 0)) continue;
-
-            int yCount = Math.min(16, Y_LIMIT - baseY); // nur y < Y_LIMIT
-            for (int x = 0; x < 16; x++) {
-                for (int y = 0; y < yCount; y++) {
-                    for (int z = 0; z < 16; z++) {
-                        BlockState state = section.getBlockState(x, y, z);
-                        if (state.isAir()) continue;
-                        add(baseX + x, baseY + y, baseZ + z, state.getBlock());
-                    }
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                for (int y = bottom; y < Y_LIMIT; y++) { // nur y < Y_LIMIT
+                    pos.set(baseX + x, y, baseZ + z);
+                    BlockState state = chunk.getBlockState(pos);
+                    if (state.isAir()) continue;
+                    add(baseX + x, y, baseZ + z, state.getBlock());
                 }
             }
         }
@@ -408,8 +435,9 @@ public class BoffoDebugModule extends Module {
             }
             if (structureWeight >= STRUCTURE_LIMIT) { // Dungeon, Trial Chamber, Ancient City ...
                 filtered++;
-                if (debug.get()) info("Gefiltert (Struktur) bei X " + (int) (sx / count) + " Z " + (int) (sz / count)
-                    + ": Bloecke=" + count + ", Struktur-Gewicht=" + structureWeight);
+                String msg = "Gefiltert (Struktur) bei X " + (int) (sx / count) + " Z " + (int) (sz / count)
+                    + ": Bloecke=" + count + ", Struktur-Gewicht=" + structureWeight;
+                if (debug.get() && reportedFilters.add(msg)) say(msg);
                 continue;
             }
 
@@ -426,7 +454,7 @@ public class BoffoDebugModule extends Module {
                 + ", markiert: " + result.size();
             if (!summary.equals(lastSummary)) {
                 lastSummary = summary;
-                info(summary);
+                say(summary);
             }
         }
     }
@@ -437,7 +465,7 @@ public class BoffoDebugModule extends Module {
             long key = (((long) ((int) b.cx() >> 4)) << 32) | (((int) b.cz() >> 4) & 0xFFFFFFFFL);
             if (!toasted.add(key)) continue;
             String coords = (int) b.cx() + "  Y " + b.minY() + "  Z " + (int) b.cz();
-            mc.getToastManager().add(new BoffoToast("Boffo Debug V1", coords, c.r, c.g, c.b));
+            mc.getToastManager().add(new BoffoToast("Boffo Debug V2", coords, c.r, c.g, c.b));
         }
     }
 }
