@@ -8,6 +8,7 @@ import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.Identifier;
 import org.joml.Matrix3x2fStack;
 import java.util.Random;
@@ -80,7 +81,6 @@ public class BoffoAntiVanishModule extends Module {
         int screenWidth = mc.getWindow().getScaledWidth();
         int screenHeight = mc.getWindow().getScaledHeight();
 
-        // Fix 1: Nutzt den korrekten Matrix3x2fStack aus dem Compiler-Feedback
         Matrix3x2fStack matrices = context.getMatrices();
 
         // PHASE 1: DER DONUT (0ms - 4800ms)
@@ -125,13 +125,12 @@ public class BoffoAntiVanishModule extends Module {
             matrices.translate((float) currentX + (donutSize / 2f), (float) currentY + (donutSize / 2f));
             matrices.scale(scale, scale);
             if (rotation != 0.0f) {
-                // Fix 2: Nutzt die JOML-eigene Rotationsmethode, da com.mojang.math.Axis nicht existiert
                 matrices.rotate((float) Math.toRadians(rotation));
             }
             matrices.translate(-(donutSize / 2f), -(donutSize / 2f));
 
-            // Fix 3: Konvertiert UV-Koordinaten in reine Integer (0 statt 0.0f), um die passende drawTexture-Ueberladung zu treffen
-            context.drawTexture(DONUT_TEX, 0, 0, 0, 0, donutSize, donutSize, donutSize, donutSize);
+            // Fix: Angepasste, universelle drawTexture-Methode, die exakt 6 Standard-Argumente erwartet
+            context.drawTexture(DONUT_TEX, 0, 0, 0, 0, donutSize, donutSize);
 
             String text = "BOFFO";
             int textWidth = mc.textRenderer.getWidth(text);
