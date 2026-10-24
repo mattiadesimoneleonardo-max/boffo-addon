@@ -29,56 +29,102 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
- * Boffo Debug: sucht unter Y = -5 nach Bloecken, die nur Spieler setzen koennen.
- * Ein Fundort zaehlt erst, wenn dort mindestens "min-blocks" solcher Bloecke zusammenliegen
- * und keine Struktur (Ancient City, Trial Chamber, Stronghold, Spawner, ...) in der Naehe ist.
+ * Boffo Debug: sucht unter Y = -5 nach Bereichen, die Spieler gebaut haben (Stashes, Farmen, Basen).
+ * Ein Bereich zaehlt erst, wenn dort mindestens "min-blocks" typische Spieler-Bloecke zusammenliegen
+ * und keine Struktur (Ancient City, Trial Chamber, Stronghold, Dungeon, Endportal, ...) in der Naehe ist.
+ * Markiert wird der ganze Bereich als Saeule von Y -64 bis 256.
  */
 public class BoffoDebugModule extends Module {
-    private static final int MAX_Y = -6;               // "unter -5"
-    private static final int MERGE_DIST_SQ = 16 * 16;   // Bloecke naeher als 16 Bloecke gehoeren zum selben Fundort
+    private static final int MAX_Y = -6;                 // "unter -5"
+    private static final int MERGE_DIST = 12;            // Funde naeher als 12 Bloecke gehoeren zum selben Bereich
     private static final int CHUNKS_PER_TICK = 3;
-    private static final int CONFIRM_TICKS = 40;        // Fund muss 2 Sekunden stabil sein
-    private static final int STRUCTURE_CHUNK_RADIUS = 2; // Struktur-Bloecke im Umkreis von 2 Chunks (ca. 32 Bloecke) schliessen den Fund aus
+    private static final int CONFIRM_TICKS = 40;         // Bereich muss 2 Sekunden stabil sein
+    private static final int STRUCTURE_RANGE = 40;       // Struktur-Bloecke im Umkreis von 40 Bloecken schliessen den Bereich aus
 
-    // Bloecke, die es unter der Erde nirgends natuerlich gibt
+    // Bloecke, die Spieler bauen (auch Kisten: mehrere Kisten zusammen = Stash)
     private static final Set<String> PLAYER_EXACT = Set.of(
-        "furnace", "blast_furnace", "smoker", "ender_chest", "anvil", "chipped_anvil", "damaged_anvil",
-        "enchanting_table", "brewing_stand", "cauldron", "beacon", "hopper", "dropper", "observer",
-        "piston", "sticky_piston", "repeater", "comparator", "redstone_lamp", "redstone_wire", "note_block",
-        "jukebox", "tnt", "crafting_table", "grindstone", "stonecutter", "loom", "cartography_table",
-        "fletching_table", "smithing_table", "composter", "tripwire_hook", "target", "slime_block", "honey_block",
-        "glowstone", "daylight_detector", "iron_block", "diamond_block", "emerald_block", "lapis_block",
-        "redstone_block", "netherite_block", "coal_block", "bricks", "quartz_block", "quartz_bricks",
-        "quartz_pillar", "chiseled_quartz_block", "smooth_quartz", "end_stone_bricks", "purpur_block", "purpur_pillar"
+        "chest", "trapped_chest", "barrel", "ender_chest", "furnace", "blast_furnace", "smoker",
+        "anvil", "chipped_anvil", "damaged_anvil", "enchanting_table", "brewing_stand", "cauldron", "beacon",
+        "hopper", "dropper", "dispenser", "observer", "piston", "sticky_piston", "repeater", "comparator",
+        "redstone_lamp", "redstone_wire", "redstone_torch", "note_block", "jukebox", "tnt", "crafting_table",
+        "grindstone", "stonecutter", "loom", "cartography_table", "fletching_table", "smithing_table", "composter",
+        "tripwire_hook", "target", "slime_block", "honey_block", "glowstone", "daylight_detector", "scaffolding",
+        "iron_block", "diamond_block", "emerald_block", "lapis_block", "redstone_block", "netherite_block", "coal_block",
+        "bricks", "quartz_block", "quartz_bricks", "quartz_pillar", "chiseled_quartz_block", "smooth_quartz",
+        "end_stone_bricks", "purpur_block", "purpur_pillar",
+        "farmland", "wheat", "carrots", "potatoes", "beetroots", "sugar_cane", "melon_stem", "pumpkin_stem",
+        "nether_wart", "cactus", "bamboo"
     );
     private static final String[] PLAYER_SUFFIX = {
-        "_concrete", "_concrete_powder", "_glazed_terracotta", "_bed", "shulker_box", "_stained_glass"
+        "_concrete", "_concrete_powder", "_glazed_terracotta", "_bed", "shulker_box", "_stained_glass", "_pressure_plate"
     };
 
-    // Bloecke, die auf eine Struktur hindeuten (Ancient City, Trial Chamber, Stronghold, Dungeon, ...)
+    // Bloecke, die auf eine Struktur hindeuten (Ancient City, Trial Chamber, Stronghold, Dungeon, Endportal, Dorf, ...)
     private static final Set<String> STRUCTURE_EXACT = Set.of(
         "sculk", "sculk_sensor", "calibrated_sculk_sensor", "sculk_shrieker", "sculk_catalyst", "sculk_vein",
         "reinforced_deepslate", "spawner", "trial_spawner", "vault", "crafter", "heavy_core",
-        "end_portal_frame", "end_portal", "ominous_trial_spawner"
+        "end_portal_frame", "end_portal", "end_gateway", "bell", "crying_obsidian", "suspicious_sand", "suspicious_gravel"
     );
-    private static final String[] STRUCTURE_CONTAINS = {"copper_bulb", "copper_grate", "chiseled_tuff", "tuff_brick"};
+    private static final String[] STRUCTURE_CONTAINS = {
+        "copper_bulb", "copper_grate", "chiseled_tuff", "tuff_brick", "infested_", "decorated_pot"
+    };
 
     private static final byte NONE = 0, PLAYER = 1, STRUCTURE = 2;
 
+    /** Ein Bereich mit Spieler-Bloecken. */
     private static class Spot {
-        final int x, y, z;                          // erster Fund (hier steht der Strahl)
-        final Set<Long> blocks = new HashSet<>();    // alle Spieler-Bloecke an diesem Fundort
+        final Set<Long> blocks = new HashSet<>();
+        int minX, maxX, minY, maxY, minZ, maxZ;
         boolean nearStructure = false;
         boolean confirmed = false;
         int validTicks = 0;
 
-        Spot(int x, int y, int z) { this.x = x; this.y = y; this.z = z; }
+        Spot(int x, int y, int z) {
+            minX = maxX = x;
+            minY = maxY = y;
+            minZ = maxZ = z;
+        }
+
+        void add(long key, int x, int y, int z) {
+            if (blocks.isEmpty()) {
+                minX = maxX = x; minY = maxY = y; minZ = maxZ = z;
+            } else {
+                minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+                minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+            }
+            blocks.add(key);
+        }
+
+        boolean near(int x, int z) {
+            return x >= minX - MERGE_DIST && x <= maxX + MERGE_DIST && z >= minZ - MERGE_DIST && z <= maxZ + MERGE_DIST;
+        }
+
+        boolean near(Spot o) {
+            return o.maxX >= minX - MERGE_DIST && o.minX <= maxX + MERGE_DIST
+                && o.maxZ >= minZ - MERGE_DIST && o.minZ <= maxZ + MERGE_DIST;
+        }
+
+        void recalc() {
+            boolean first = true;
+            for (long key : blocks) {
+                int x = BlockPos.unpackLongX(key), y = BlockPos.unpackLongY(key), z = BlockPos.unpackLongZ(key);
+                if (first) { minX = maxX = x; minY = maxY = y; minZ = maxZ = z; first = false; continue; }
+                minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+                minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+            }
+        }
+
+        int centerX() { return (minX + maxX) / 2; }
+        int centerY() { return (minY + maxY) / 2; }
+        int centerZ() { return (minZ + maxZ) / 2; }
     }
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
 
     private final Setting<Integer> minBlocks = sgGeneral.add(new IntSetting.Builder()
-        .name("min-blocks").description("Mindestanzahl Spieler-Bloecke an einer Stelle, damit sie angezeigt wird.")
+        .name("min-blocks").description("Mindestanzahl Spieler-Bloecke in einem Bereich, damit er markiert wird.")
         .defaultValue(5).range(5, 50).sliderRange(5, 50).build());
     private final Setting<SettingColor> beamColor = sgGeneral.add(new ColorSetting.Builder()
         .name("beam-color").description("Farbe des Strahls.")
@@ -90,10 +136,11 @@ public class BoffoDebugModule extends Module {
     private final Queue<Chunk> queue = new ConcurrentLinkedQueue<>();
     private final List<Spot> spots = new ArrayList<>();
     private final Queue<Spot> pendingToasts = new ArrayDeque<>();
-    private final Set<Long> structureCells = new HashSet<>(); // Chunk-Spalten, in denen Struktur-Bloecke gesehen wurden
+    private final Set<Long> structureCells = new HashSet<>(); // Chunk-Spalten mit Struktur-Bloecken
     private final Map<Block, Byte> cache = new HashMap<>();
     private final BlockPos.Mutable pos = new BlockPos.Mutable();
     private int toastCooldown = 0;
+    private int mergeTimer = 0;
 
     public BoffoDebugModule() {
         super(BoffoAddon.CATEGORY, "boffo-debug", "Boffo Debug");
@@ -116,6 +163,7 @@ public class BoffoDebugModule extends Module {
         pendingToasts.clear();
         structureCells.clear();
         toastCooldown = 0;
+        mergeTimer = 0;
     }
 
     @EventHandler
@@ -147,6 +195,11 @@ public class BoffoDebugModule extends Module {
             scan(chunk);
         }
 
+        if (++mergeTimer >= 20) {
+            mergeTimer = 0;
+            mergeSpots();
+        }
+
         updateSpots();
         showToasts();
     }
@@ -176,24 +229,41 @@ public class BoffoDebugModule extends Module {
     private void addFind(int x, int y, int z) {
         long key = BlockPos.asLong(x, y, z);
         for (Spot spot : spots) {
-            int dx = spot.x - x, dz = spot.z - z;
-            if (dx * dx + dz * dz <= MERGE_DIST_SQ) {
-                spot.blocks.add(key);
+            if (spot.near(x, z)) {
+                spot.add(key, x, y, z);
                 return;
             }
         }
         Spot spot = new Spot(x, y, z);
-        spot.blocks.add(key);
+        spot.add(key, x, y, z);
         spots.add(spot);
     }
 
     private void removeFind(int x, int y, int z) {
         long key = BlockPos.asLong(x, y, z);
-        for (Spot spot : spots) spot.blocks.remove(key);
+        for (Spot spot : spots) {
+            if (spot.blocks.remove(key) && !spot.blocks.isEmpty()) spot.recalc();
+        }
         spots.removeIf(spot -> spot.blocks.isEmpty());
     }
 
-    /** Prueft jeden Fundort: genug Bloecke, keine Struktur in der Naehe, 2 Sekunden stabil. */
+    /** Bereiche, die zusammenwachsen, werden zu einem vereint. */
+    private void mergeSpots() {
+        for (int i = 0; i < spots.size(); i++) {
+            Spot a = spots.get(i);
+            for (int j = spots.size() - 1; j > i; j--) {
+                Spot b = spots.get(j);
+                if (a.near(b)) {
+                    for (long key : b.blocks) {
+                        a.add(key, BlockPos.unpackLongX(key), BlockPos.unpackLongY(key), BlockPos.unpackLongZ(key));
+                    }
+                    spots.remove(j);
+                }
+            }
+        }
+    }
+
+    /** Prueft jeden Bereich: genug Bloecke, keine Struktur in der Naehe, 2 Sekunden stabil. */
     private void updateSpots() {
         boolean scanning = !queue.isEmpty();
         int min = minBlocks.get();
@@ -215,10 +285,12 @@ public class BoffoDebugModule extends Module {
     }
 
     private boolean nearStructure(Spot spot) {
-        int cx = spot.x >> 4, cz = spot.z >> 4;
-        for (int dx = -STRUCTURE_CHUNK_RADIUS; dx <= STRUCTURE_CHUNK_RADIUS; dx++) {
-            for (int dz = -STRUCTURE_CHUNK_RADIUS; dz <= STRUCTURE_CHUNK_RADIUS; dz++) {
-                if (structureCells.contains(cell(cx + dx, cz + dz))) return true;
+        if (structureCells.isEmpty()) return false;
+        int x0 = (spot.minX - STRUCTURE_RANGE) >> 4, x1 = (spot.maxX + STRUCTURE_RANGE) >> 4;
+        int z0 = (spot.minZ - STRUCTURE_RANGE) >> 4, z1 = (spot.maxZ + STRUCTURE_RANGE) >> 4;
+        for (int cx = x0; cx <= x1; cx++) {
+            for (int cz = z0; cz <= z1; cz++) {
+                if (structureCells.contains(cell(cx, cz))) return true;
             }
         }
         return false;
@@ -228,7 +300,7 @@ public class BoffoDebugModule extends Module {
         return ((long) cx << 32) | (cz & 0xFFFFFFFFL);
     }
 
-    /** Eine Benachrichtigung pro neuem Fundort, hoechstens eine alle 0,5 Sekunden. */
+    /** Eine Benachrichtigung pro neuem Bereich (Koordinaten = Mitte), hoechstens eine alle 0,5 Sekunden. */
     private void showToasts() {
         if (toastCooldown > 0) toastCooldown--;
         if (toastCooldown > 0) return;
@@ -240,7 +312,7 @@ public class BoffoDebugModule extends Module {
         if (spot == null) return;
 
         SettingColor c = toastColor.get();
-        String coords = "X " + spot.x + "  Y " + spot.y + "  Z " + spot.z;
+        String coords = "X " + spot.centerX() + "  Y " + spot.centerY() + "  Z " + spot.centerZ();
         mc.getToastManager().add(new BoffoToast("Boffo Debug V1", coords, c.r, c.g, c.b));
         toastCooldown = 10;
     }
@@ -261,19 +333,25 @@ public class BoffoDebugModule extends Module {
         if (spots.isEmpty() || !inOverworld()) return;
 
         SettingColor c = beamColor.get();
-        Color side = new Color(c.r, c.g, c.b, 70);
+        Color side = new Color(c.r, c.g, c.b, 45);
+        Color sideStrong = new Color(c.r, c.g, c.b, 90);
         Color line = new Color(Math.min(255, c.r + 40), Math.min(255, c.g + 40), Math.min(255, c.b + 40), 255);
-        Color core = new Color((c.r + 255 * 2) / 3, (c.g + 255 * 2) / 3, (c.b + 255 * 2) / 3, 200);
+        Color core = new Color((c.r + 255 * 2) / 3, (c.g + 255 * 2) / 3, (c.b + 255 * 2) / 3, 210);
 
         for (Spot spot : spots) {
             if (!spot.confirmed) continue;
-            double cx = spot.x + 0.5, cz = spot.z + 0.5;
-            // breiter Strahl durch die ganze Welt
-            event.renderer.box(cx - 0.3, -64, cz - 0.3, cx + 0.3, 256, cz + 0.3, side, line, ShapeMode.Both, 0);
-            // heller Kern
-            event.renderer.box(cx - 0.08, -64, cz - 0.08, cx + 0.08, 256, cz + 0.08, core, core, ShapeMode.Sides, 0);
-            // Markierung am ersten Fund
-            event.renderer.box(spot.x, spot.y, spot.z, spot.x + 1, spot.y + 1, spot.z + 1, side, line, ShapeMode.Both, 0);
+
+            double x1 = spot.minX - 1, x2 = spot.maxX + 2;
+            double z1 = spot.minZ - 1, z2 = spot.maxZ + 2;
+
+            // ganzer Bereich als Saeule durch die Welt
+            event.renderer.box(x1, -64, z1, x2, 256, z2, side, line, ShapeMode.Both, 0);
+            // heller Strahl in der Mitte des Bereichs
+            double cx = (x1 + x2) / 2, cz = (z1 + z2) / 2;
+            event.renderer.box(cx - 0.12, -64, cz - 0.12, cx + 0.12, 256, cz + 0.12, core, core, ShapeMode.Sides, 0);
+            // Kasten um die tatsaechlichen Bloecke
+            event.renderer.box(spot.minX, spot.minY, spot.minZ, spot.maxX + 1, spot.maxY + 1, spot.maxZ + 1,
+                sideStrong, line, ShapeMode.Both, 0);
         }
     }
 }
